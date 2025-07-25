@@ -2,7 +2,7 @@
 Modified TotalExport script for Autodesk Fusion 360.
 
 This version enhances the original script by adding logic to avoid
-reexporting designs that have already been saved.  When the script
+re‑exporting designs that have already been saved.  When the script
 discovers that a Fusion archive (.f3d or .f3z) for a design already
 exists in the destination folder, it prompts the user to confirm if
 the existing archive should be overwritten.  If the user declines,
