@@ -2,7 +2,7 @@
 Modified TotalExport script for Autodesk Fusion 360.
 
 This version enhances the original script by adding logic to avoid
-re‑exporting designs that have already been saved.  When the script
+reexporting designs that have already been saved.  When the script
 discovers that a Fusion archive (.f3d or .f3z) for a design already
 exists in the destination folder, it prompts the user to confirm if
 the existing archive should be overwritten.  If the user declines,
@@ -232,11 +232,20 @@ class TotalExport(object):
                 folder = project.rootFolder
                 files.extend(self._get_files_for(folder))
 
-                progress_dialog.message = "Hub: {} of {}\nProject: {} of {}\nExporting design %v of %m".format(
+                # Update the progress dialog message to include the current project name.  The
+                # message now shows the hub and project indices as before, followed by the
+                # project name.  The placeholders %v and %m will be replaced by the
+                # progress dialog with the current file index and total count.
+                progress_dialog.message = (
+                    "Hub: {} of {}\n"
+                    "Project: {} of {} - {}\n"
+                    "Exporting design %v of %m"
+                ).format(
                     hub_index + 1,
                     all_hubs.count,
                     project_index + 1,
-                    all_projects.count
+                    all_projects.count,
+                    project.name
                 )
                 progress_dialog.maximumValue = len(files)
                 progress_dialog.reset()
@@ -256,6 +265,22 @@ class TotalExport(object):
                         return
 
                     file = files[file_index]  # type: adsk.core.DataFile
+                    # Update the progress dialog message to include the current file name.
+                    # This provides more context to the user about which design is being
+                    # exported.  Keep the placeholders %v and %m to show numeric progress.
+                    progress_dialog.message = (
+                        "Hub: {} of {}\n"
+                        "Project: {} of {} - {}\n"
+                        "Drawing: {}\n"
+                        "Exporting design %v of %m"
+                    ).format(
+                        hub_index + 1,
+                        all_hubs.count,
+                        project_index + 1,
+                        all_projects.count,
+                        project.name,
+                        file.name
+                    )
                     progress_dialog.progressValue = file_index + 1
                     self._write_data_file(output_path, file)
                 self.log.info("Finished exporting project \"{}\"".format(project.name))
