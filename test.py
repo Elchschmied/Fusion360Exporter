@@ -28,6 +28,10 @@ class TotalExport(object):
         # Wird einmalig gesetzt: True = stets überschreiben; False = nie überschreiben.
         self.overwrite_existing: bool | None = None
 
+        # Fortschrittsdaten: enthalt bereits exportierte Projekte
+        self.completed_projects = set()
+        self.progress_path: str | None = None
+
     def __enter__(self):
         return self
 
@@ -45,6 +49,10 @@ class TotalExport(object):
         output_path = self._ask_for_output_path()
         if output_path is None:
             return
+
+        # Fortschrittsdatei bestimmen und ggf. bereits exportierte Projekte laden
+        self.progress_path = os.path.join(output_path, 'project_progress.tsv')
+        self._load_progress()
 
         # Einmalige Abfrage, ob vorhandene Backups überschrieben werden sollen.
         overwrite_prompt = (
@@ -120,6 +128,13 @@ class TotalExport(object):
             for project_index in range(all_projects.count):
                 files = []
                 project = all_projects.item(project_index)
+                # Prüfen, ob dieses Projekt bereits im Fortschritt eingetragen ist
+                if (hub.name, project.name) in self.completed_projects:
+                    self.log.info(
+                        "Skipping project \"{}\" – already recorded in progress file".format(project.name)
+                    )
+                    continue
+
                 self.log.info("Exporting project \"{}\"".format(project.name))
 
                 # Basis-Sicherungspfad (noch nicht angelegt) ins Log schreiben.
@@ -146,6 +161,8 @@ class TotalExport(object):
 
                 if not files:
                     self.log.info("No files to export for this project")
+                    # Projekt dennoch als abgeschlossen markieren
+                    self._append_progress(hub.name, project.name)
                     continue
 
                 for file_index in range(len(files)):
@@ -157,7 +174,11 @@ class TotalExport(object):
                     file = files[file_index]  # type: adsk.core.DataFile
                     progress_dialog.progressValue = file_index + 1
                     self._write_data_file(output_path, file)
+
                 self.log.info("Finished exporting project \"{}\"".format(project.name))
+                # Projekt als abgeschlossen in der Fortschrittsdatei eintragen
+                self._append_progress(hub.name, project.name)
+
             self.log.info("Finished exporting hub \"{}\"".format(hub.name))
 
     def _ask_for_output_path(self):
@@ -444,11 +465,71 @@ class TotalExport(object):
         return out_path
 
     def _name(self, name):
-        """Sanitisiert Namen (Datei-/Ordnernamen) und entfernt unerlaubte Zeichen."""
-        name = re.sub('[^a-zA-Z0-9 \n\.]', '', name).strip()
+        """Sanitize names by removing invalid filesystem characters.
+
+        Also ensures that file names ending in .stp/.stl/.igs have
+        underscores inserted before their extensions to avoid confusing
+        directory names with file names.
+        """
+        name = re.sub('[^a-zA-Z0-9 \\n\\.]', '', name).strip()
         if name.endswith('.stp') or name.endswith('.stl') or name.endswith('.igs'):
             name = name[0: -4] + "_" + name[-3:]
         return name
+
+    # -------------------------------------------------------------------------
+    # Progress tracking helpers
+    #
+    # The export process can be interrupted, so it's useful to record which
+    # projects have been successfully processed.  This table is stored in a
+    # simple TSV file (hub\tproject per line) in the export root.  When the
+    # script is restarted, it loads this file and skips any projects listed in
+    # it.  After completing a project export, the hub/project name is appended
+    # to the file.
+
+    def _load_progress(self) -> None:
+        """Load the progress file into self.completed_projects.
+
+        If self.progress_path is defined and the file exists, read each line
+        and add a (hub_name, project_name) tuple to the completed_projects set.
+        This allows resuming an interrupted export by skipping previously
+        exported projects.
+        """
+        # Ensure progress_path has been set
+        if not self.progress_path:
+            return
+        self.completed_projects.clear()
+        try:
+            if os.path.exists(self.progress_path):
+                with open(self.progress_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        parts = line.split('\t')
+                        if len(parts) >= 2:
+                            hub_name, project_name = parts[0], parts[1]
+                            self.completed_projects.add((hub_name, project_name))
+        except Exception as ex:
+            # Log but continue; progress tracking is optional
+            self.log.exception("Failed to load progress file", exc_info=ex)
+
+    def _append_progress(self, hub_name: str, project_name: str) -> None:
+        """Append a completed project to the progress file.
+
+        When a project has finished exporting, call this method to record its
+        hub and project names.  It will create the file if necessary and
+        append a new line using tab separation.  The (hub_name, project_name)
+        tuple is also added to self.completed_projects.
+        """
+        if not self.progress_path:
+            return
+        try:
+            with open(self.progress_path, 'a', encoding='utf-8') as f:
+                f.write(f"{hub_name}\t{project_name}\n")
+            self.completed_projects.add((hub_name, project_name))
+        except Exception as ex:
+            # Log but don't interrupt the export
+            self.log.exception("Failed to append to progress file", exc_info=ex)
 
 
 def run(context):
@@ -460,4 +541,4 @@ def run(context):
             total_export.run(context)
     except:
         ui = app.userInterface
-        ui.messageBox('Failed:\\n{}'.format(traceback.format_exc()))
+        ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
