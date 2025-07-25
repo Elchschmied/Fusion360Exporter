@@ -90,7 +90,7 @@ class TotalExport(object):
             "Überschreiben?",
             adsk.core.MessageBoxButtonTypes.YesNoButtonType
         )
-        # DialogYes (value 2) indicates the user clicked Yes, see Fusion API docs:contentReference[oaicite:0]{index=0}.
+        # DialogYes (value 2) indicates the user clicked Yes:contentReference[oaicite:0]{index=0}.
         self.overwrite_existing = overwrite_result == adsk.core.DialogResults.DialogYes
 
         # Configure logging to write to a file in the output directory
@@ -254,6 +254,76 @@ class TotalExport(object):
 
         self.log.info("Exporting file \"{}\"".format(file.name))
 
+        # ---------------------------------------------------------------------
+        # Early skip check: Determine the expected location of the exported
+        # archive before opening the design.  If a local backup already
+        # exists and the remote design hasn't changed (based on
+        # dateModified), then skip exporting this file entirely.  This
+        # prevents unnecessary calls to self.documents.open() for files
+        # whose backups are already up to date.
+        #
+        # Build the relative path inside the project for this file by
+        # walking up the folder hierarchy, just as is done later during
+        # export.  Note: do not create any directories here — only compute
+        # the path for comparison.
+        file_folder = file.parentFolder
+        relative_path = self._name(file_folder.name)
+        tmp_folder = file_folder
+        # Ascend the folder tree until no parentFolder is left
+        while tmp_folder.parentFolder is not None:
+            tmp_folder = tmp_folder.parentFolder
+            relative_path = os.path.join(self._name(tmp_folder.name), relative_path)
+        # The top-level folder's parentProject and parentHub identify where
+        # this design belongs.
+        parent_project_early = tmp_folder.parentProject
+        parent_hub_early = parent_project_early.parentHub
+        # Compute the full path to where the exported archive would reside.
+        tentative_export_dir = os.path.join(
+            root_folder,
+            "Hub {}".format(self._name(parent_hub_early.name)),
+            "Project {}".format(self._name(parent_project_early.name)),
+            relative_path,
+            self._name(file.name) + "." + file.fileExtension
+        )
+        tentative_export_base = os.path.join(tentative_export_dir, self._name(file.name))
+        tentative_dest_archive = tentative_export_base + "." + file.fileExtension
+        # If an archive exists and overwrite_existing is False (incremental backup),
+        # compare timestamps and skip without opening the document if the
+        # local backup is as recent or newer than the remote design.
+        if os.path.exists(tentative_dest_archive) and not self.overwrite_existing:
+            try:
+                # Refresh metadata on the DataFile object.  Ignore errors.
+                file.refresh()
+            except BaseException:
+                pass
+            remote_ts = None
+            # Try to handle both a raw epoch value or an adsk.core.DateTime
+            try:
+                remote_ts = float(file.dateModified)
+            except Exception:
+                try:
+                    remote_date = file.dateModified
+                    remote_ts = time.mktime((remote_date.year,
+                                             remote_date.month,
+                                             remote_date.day,
+                                             remote_date.hour,
+                                             remote_date.minute,
+                                             remote_date.second,
+                                             0, 0, -1))
+                except Exception:
+                    remote_ts = None
+            if remote_ts is not None:
+                try:
+                    local_ts = os.path.getmtime(tentative_dest_archive)
+                    if local_ts >= remote_ts:
+                        self.log.info(
+                            "Skipping file \"{}\" – local backup is up to date (early check).".format(file.name)
+                        )
+                        return
+                except Exception:
+                    # On failure to get local timestamp, proceed to open the file.
+                    pass
+
         document = None
         # Attempt to open the document with a retry mechanism.  Network or
         # connectivity errors can cause this to fail; in that case the user
@@ -323,58 +393,10 @@ class TotalExport(object):
             file_export_base = os.path.join(export_dir, self._name(file.name))
             dest_archive = file_export_base + "." + file.fileExtension
 
-            # If a previous archive exists, decide whether to skip based on
-            # overwrite settings and file modification dates.  When
-            # overwrite_existing is False (incremental backup), we compare the
-            # modification date in the cloud with the local file's
-            # modification time.  Only if the cloud version is newer will we
-            # overwrite the existing backup; otherwise we skip exporting.
-            if os.path.exists(dest_archive):
-                if not self.overwrite_existing:
-                    # Attempt to refresh the DataFile to get current metadata.
-                    # Refresh may raise an exception if the file cannot be updated;
-                    # failure to refresh should not cause skipping by default.
-                    try:
-                        file.refresh()
-                    except BaseException:
-                        pass
-                    # Attempt to obtain the remote modification time.  Some API
-                    # versions return a UNIX epoch seconds value directly for
-                    # dateModified, others return a DateTime object.  We
-                    # accommodate both.
-                    remote_ts = None
-                    try:
-                        # If dateModified is a float/int (epoch seconds) this cast will succeed.
-                        remote_ts = float(file.dateModified)
-                    except Exception:
-                        try:
-                            # Otherwise treat it as an adsk.core.DateTime and
-                            # reconstruct a timestamp.
-                            remote_date = file.dateModified
-                            remote_ts = time.mktime((remote_date.year,
-                                                     remote_date.month,
-                                                     remote_date.day,
-                                                     remote_date.hour,
-                                                     remote_date.minute,
-                                                     remote_date.second,
-                                                     0, 0, -1))
-                        except Exception:
-                            remote_ts = None
-                    if remote_ts is not None:
-                        # Compare remote modification time with local file
-                        try:
-                            local_ts = os.path.getmtime(dest_archive)
-                            if local_ts >= remote_ts:
-                                # Local backup is as recent or newer; skip exporting
-                                self.log.info(
-                                    "Skipping file \"{}\" – local backup is up to date.".format(file.name)
-                                )
-                                return
-                        except Exception:
-                            # On failure to get local timestamp, fall through and export
-                            pass
-                    # If remote_ts could not be determined, default to exporting
-                # If overwrite_existing is True, fall through and overwrite
+            # A previous check was performed before opening the document to
+            # determine whether this file should be skipped.  At this point,
+            # either overwrite_existing is True or the remote design is newer,
+            # so we unconditionally overwrite the existing archive (if any).
 
             self.log.info("Writing to \"{}\"".format(export_dir))
 
@@ -551,7 +573,7 @@ class TotalExport(object):
         underscores inserted before their extensions to avoid confusing
         directory names with file names.
         """
-        name = re.sub('[^a-zA-Z0-9 \n\.]', '', name).strip()
+        name = re.sub('[^a-zA-Z0-9 \\n\\.]', '', name).strip()
 
         if name.endswith('.stp') or name.endswith('.stl') or name.endswith('.igs'):
             name = name[0: -4] + "_" + name[-3:]
